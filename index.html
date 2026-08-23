@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cat-Bot Avatar</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>🐱 Cat-Bot Avatar</h1>
+    <div id="statusPill" class="pill idle">bereit</div>
+  </header>
+
+  <main class="stage">
+    <section class="camera-pane">
+      <video id="cam" autoplay playsinline muted></video>
+      <canvas id="camOverlay"></canvas>
+      <p class="hint">Kamera-Feed mit Tracking-Overlay (Gesicht / Hände / Pose)</p>
+    </section>
+
+    <section class="avatar-pane">
+      <canvas id="avatar" width="480" height="480"></canvas>
+      <div id="subtitle" class="subtitle"></div>
+    </section>
+
+    <aside class="panel">
+      <button id="startBtn">Starten (Kamera + Mikrofon)</button>
+
+      <div class="metrics">
+        <div><span>Frame-Latenz</span><b id="mFrame">–</b></div>
+        <div><span>Gesicht erkannt</span><b id="mFace">–</b></div>
+        <div><span>Hände erkannt</span><b id="mHands">–</b></div>
+        <div><span>Zustand</span><b id="mState">idle</b></div>
+        <div><span>ASR</span><b id="mAsr">aus</b></div>
+      </div>
+
+      <div class="log-wrap">
+        <h2>Gespräch</h2>
+        <div id="log" class="log"></div>
+      </div>
+
+      <details class="notes">
+        <summary>Was ist hier real, was nicht?</summary>
+        <p>
+          Gesichts-/Hand-/Pose-Tracking läuft mit echten ML-Modellen (MediaPipe
+          Tasks Vision) direkt im Browser. Sprache läuft über die native
+          Web Speech API (Browser-ASR/TTS). Die Konversationslogik ist ein
+          einfacher, lokaler Regel-Responder — keine Cloud-KI ohne eigenen
+          Server. Der Avatar ist ein stilisierter Cat-Bot, kein fotorealistisches
+          Abbild. Details siehe README.
+        </p>
+      </details>
+    </aside>
+  </main>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
