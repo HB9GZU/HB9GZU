@@ -8,7 +8,7 @@
 </head>
 <body>
   <header class="topbar">
-    <h1>🐱 Cat-Bot Avatar</h1>
+    <h1>🐱 Cat-Bot — Jarvis-Modus</h1>
     <div id="statusPill" class="pill idle">bereit</div>
   </header>
 
@@ -25,7 +25,37 @@
     </section>
 
     <aside class="panel">
-      <button id="startBtn">Starten (Kamera + Mikrofon)</button>
+      <div class="btn-row">
+        <button id="startBtn">Starten (Kamera + Mikrofon)</button>
+        <button id="stopBtn" type="button" title="Sprachausgabe sofort unterbrechen">⏹ Stop</button>
+      </div>
+
+      <details class="settings" id="settingsPanel">
+        <summary>⚙️ Einstellungen</summary>
+        <label>
+          Assistenten-Name
+          <input id="cfgName" type="text" value="Jarvis" maxlength="30" />
+        </label>
+        <label class="row">
+          <input id="cfgWakeWord" type="checkbox" checked />
+          Nur reagieren, wenn der Name im Satz vorkommt
+        </label>
+        <label>
+          Sprache
+          <select id="cfgLang">
+            <option value="de-DE">Deutsch</option>
+            <option value="en-US">English</option>
+          </select>
+        </label>
+        <label>
+          Eigener LLM-Endpoint (optional)
+          <input id="cfgEndpoint" type="text" placeholder="https://dein-server.example/chat" />
+        </label>
+        <div class="settings-actions">
+          <button id="saveSettingsBtn" type="button">Speichern</button>
+          <button id="clearMemoryBtn" type="button">Gedächtnis leeren</button>
+        </div>
+      </details>
 
       <div class="metrics">
         <div><span>Frame-Latenz</span><b id="mFrame">–</b></div>
@@ -45,10 +75,11 @@
         <p>
           Gesichts-/Hand-/Pose-Tracking läuft mit echten ML-Modellen (MediaPipe
           Tasks Vision) direkt im Browser. Sprache läuft über die native
-          Web Speech API (Browser-ASR/TTS). Die Konversationslogik ist ein
-          einfacher, lokaler Regel-Responder — keine Cloud-KI ohne eigenen
-          Server. Der Avatar ist ein stilisierter Cat-Bot, kein fotorealistisches
-          Abbild. Details siehe README.
+          Web Speech API (Browser-ASR/TTS). Zusätzlich zum Regel-Responder gibt
+          es jetzt lokale "Jarvis"-Skills (Uhrzeit, Datum, Website öffnen,
+          Web-Suche, Wetter, Rechnen, Witze, Gedächtnis) — keine Cloud-KI ohne
+          eigenen Server. Der Avatar ist ein stilisierter Cat-Bot, kein
+          fotorealistisches Abbild. Details siehe README.
         </p>
       </details>
     </aside>

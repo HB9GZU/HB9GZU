@@ -1,14 +1,22 @@
 // Cat-Bot Avatar — läuft komplett im Browser.
-// Tracking: MediaPipe Tasks Vision (Face/Hand/Pose Landmarker, echte ML-Modelle).
+// Tracking: MediaPipe Tasks Vision (Face/Hand/Pose Landmarker, echte ML-Modelle),
+// wird erst beim Start dynamisch nachgeladen (siehe initTrackers) — schlägt der
+// CDN-Zugriff fehl (Firewall, offline), läuft Jarvis trotzdem: Kamera ohne
+// Tracking-Overlay, Sprache/Skills funktionieren unabhängig davon weiter.
 // Sprache: Web Speech API (SpeechRecognition + SpeechSynthesis, native Browser-Engines).
-// Dialog: lokaler Regel-Responder mit optionalem Hook auf einen eigenen Server (siehe unten).
+// Dialog: lokale Jarvis-Skills + Regel-Responder, mit optionalem Hook auf einen
+// eigenen LLM-Server (siehe unten).
+
+const MEDIAPIPE_CDN = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 
 import {
-  FilesetResolver,
-  FaceLandmarker,
-  HandLandmarker,
-  PoseLandmarker,
-} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+  DEFAULT_ASSISTANT_NAME,
+  containsWakeWord,
+  stripWakeWord,
+  redact,
+  getSkillReply,
+  clearMemory,
+} from "./skills.js";
 
 const $ = (id) => document.getElementById(id);
 const video = $("cam");
@@ -17,9 +25,16 @@ const overlayCtx = overlay.getContext("2d");
 const avatarCanvas = $("avatar");
 const actx = avatarCanvas.getContext("2d");
 const startBtn = $("startBtn");
+const stopBtn = $("stopBtn");
 const statusPill = $("statusPill");
 const subtitle = $("subtitle");
 const logEl = $("log");
+const cfgName = $("cfgName");
+const cfgWakeWord = $("cfgWakeWord");
+const cfgLang = $("cfgLang");
+const cfgEndpoint = $("cfgEndpoint");
+const saveSettingsBtn = $("saveSettingsBtn");
+const clearMemoryBtn = $("clearMemoryBtn");
 
 const metrics = {
   frame: $("mFrame"),
@@ -30,6 +45,99 @@ const metrics = {
 };
 
 // ---------------------------------------------------------------------------
+// Einstellungen (Name, Wake-Word, Sprache, LLM-Endpoint) — persistiert in
+// localStorage, damit man keinen eigenen Server/Build braucht, um Jarvis
+// auf die eigene Umgebung anzupassen.
+// ---------------------------------------------------------------------------
+const SETTINGS_KEY = "jarvisSettings";
+const CHATLOG_KEY = "jarvisChatLog";
+const MAX_STORED_LOG_ENTRIES = 200;
+
+function loadSettings() {
+  const defaults = {
+    name: DEFAULT_ASSISTANT_NAME[0].toUpperCase() + DEFAULT_ASSISTANT_NAME.slice(1),
+    wakeWord: true,
+    lang: "de-DE",
+    endpoint: "",
+  };
+  try {
+    const raw = window.localStorage.getItem(SETTINGS_KEY);
+    if (!raw) return defaults;
+    return { ...defaults, ...JSON.parse(raw) };
+  } catch {
+    return defaults;
+  }
+}
+
+function saveSettings(settings) {
+  window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+}
+
+let settings = loadSettings();
+
+function applySettingsToForm() {
+  cfgName.value = settings.name;
+  cfgWakeWord.checked = settings.wakeWord;
+  cfgLang.value = settings.lang;
+  cfgEndpoint.value = settings.endpoint;
+}
+
+function applySettingsToRuntime() {
+  if (recognition) recognition.lang = settings.lang;
+}
+
+applySettingsToForm();
+
+saveSettingsBtn?.addEventListener("click", () => {
+  settings = {
+    name: (cfgName.value || DEFAULT_ASSISTANT_NAME).trim(),
+    wakeWord: cfgWakeWord.checked,
+    lang: cfgLang.value,
+    endpoint: cfgEndpoint.value.trim(),
+  };
+  saveSettings(settings);
+  applySettingsToRuntime();
+  log("sys", "Einstellungen gespeichert.");
+});
+
+clearMemoryBtn?.addEventListener("click", () => {
+  clearMemory(window.localStorage);
+  log("sys", "Gedächtnis geleert.");
+});
+
+const skillCtx = {
+  storage: window.localStorage,
+  now: () => new Date(),
+  openUrl: (url) => window.open(url, "_blank", "noopener"),
+  fetchImpl: (...args) => window.fetch(...args),
+  rng: Math.random,
+};
+
+function persistLogEntry(role, text) {
+  try {
+    const raw = window.localStorage.getItem(CHATLOG_KEY);
+    const entries = raw ? JSON.parse(raw) : [];
+    entries.push({ role, text: redact(text), ts: Date.now() });
+    while (entries.length > MAX_STORED_LOG_ENTRIES) entries.shift();
+    window.localStorage.setItem(CHATLOG_KEY, JSON.stringify(entries));
+  } catch (e) {
+    console.warn("Konnte Gespräch nicht persistieren", e);
+  }
+}
+
+function restorePersistedLog() {
+  try {
+    const raw = window.localStorage.getItem(CHATLOG_KEY);
+    const entries = raw ? JSON.parse(raw) : [];
+    if (!entries.length) return;
+    log("sys", "— vorheriges Gespräch —");
+    for (const entry of entries) renderLogLine(entry.role, entry.text);
+  } catch (e) {
+    console.warn("Konnte Gespräch nicht laden", e);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Optionaler Hook für eine echte LLM-Anbindung.
 // Standard: lokaler Regel-Responder (kein Server, keine Keys nötig).
 // Wer echte Konversation will, setzt window.CATBOT_LLM_ENDPOINT auf einen
@@ -37,9 +145,10 @@ const metrics = {
 // dort, nie im Browser). Erwartet: POST {text} -> {reply}.
 // ---------------------------------------------------------------------------
 async function getBotReply(userText) {
-  if (window.CATBOT_LLM_ENDPOINT) {
+  const endpoint = window.CATBOT_LLM_ENDPOINT || settings.endpoint;
+  if (endpoint) {
     try {
-      const res = await fetch(window.CATBOT_LLM_ENDPOINT, {
+      const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: userText }),
@@ -69,7 +178,7 @@ function ruleResponder(text) {
     return pick(["Bis bald!", "Tschüss, war schön mit dir zu reden.", "Man sieht sich!"]);
   }
   if (nameWords.some((w) => t.includes(w))) {
-    return "Ich bin Cat-Bot, dein Kamera-Avatar.";
+    return `Ich bin ${settings.name}, dein Kamera-Avatar.`;
   }
   if (howAreYou.some((w) => t.includes(w))) {
     return "Mir geht's gut, danke! Und dir?";
@@ -94,13 +203,18 @@ function pick(arr) {
 // ---------------------------------------------------------------------------
 // Logging / UI helpers
 // ---------------------------------------------------------------------------
-function log(role, text) {
+function renderLogLine(role, text) {
   const line = document.createElement("div");
   line.className = role;
-  const label = role === "me" ? "Du" : role === "bot" ? "Cat-Bot" : "System";
+  const label = role === "me" ? "Du" : role === "bot" ? settings.name : "System";
   line.textContent = `${label}: ${text}`;
   logEl.appendChild(line);
   logEl.scrollTop = logEl.scrollHeight;
+}
+
+function log(role, text) {
+  renderLogLine(role, text);
+  if (role === "me" || role === "bot") persistLogEntry(role, text);
 }
 
 function setPill(state) {
@@ -278,11 +392,14 @@ function faceDetectedRecently() {
 // ---------------------------------------------------------------------------
 let faceLandmarker, handLandmarker, poseLandmarker;
 let trackingRunning = false;
+let trackingAvailable = false;
 
 async function initTrackers() {
-  const filesetResolver = await FilesetResolver.forVisionTasks(
-    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+  const { FilesetResolver, FaceLandmarker, HandLandmarker, PoseLandmarker } = await import(
+    /* webpackIgnore: true */ `${MEDIAPIPE_CDN}/vision_bundle.mjs`
   );
+
+  const filesetResolver = await FilesetResolver.forVisionTasks(`${MEDIAPIPE_CDN}/wasm`);
 
   faceLandmarker = await FaceLandmarker.createFromOptions(filesetResolver, {
     baseOptions: {
@@ -315,6 +432,8 @@ async function initTrackers() {
     runningMode: "VIDEO",
     numPoses: 1,
   });
+
+  trackingAvailable = true;
 }
 
 function blendshapeValue(categories, name) {
@@ -440,10 +559,12 @@ function drawPoseOverlay(landmarks) {
 
 function trackingLoop() {
   if (!trackingRunning) return;
-  const frameStart = performance.now();
-  processTrackingResults(frameStart);
-  const frameTime = performance.now() - frameStart;
-  metrics.frame.textContent = `${frameTime.toFixed(1)} ms`;
+  if (trackingAvailable) {
+    const frameStart = performance.now();
+    processTrackingResults(frameStart);
+    const frameTime = performance.now() - frameStart;
+    metrics.frame.textContent = `${frameTime.toFixed(1)} ms`;
+  }
   requestAnimationFrame(trackingLoop);
 }
 
@@ -471,7 +592,7 @@ function initSpeech() {
   }
 
   recognition = new SpeechRecognitionCtor();
-  recognition.lang = "de-DE";
+  recognition.lang = settings.lang;
   recognition.continuous = true;
   recognition.interimResults = true;
 
@@ -523,9 +644,29 @@ function initSpeech() {
 async function handleUserUtterance(text) {
   pendingTranscript = "";
   subtitle.textContent = "";
-  log("me", text);
 
-  const reply = await getBotReply(text);
+  if (settings.wakeWord && !containsWakeWord(text, settings.name)) {
+    // Wie bei Jarvis: ohne Namensnennung im Satz wird die Aussage ignoriert.
+    return;
+  }
+
+  log("me", text);
+  const forSkills = settings.wakeWord ? stripWakeWord(text, settings.name) : text;
+
+  const skillResult = await getSkillReply(forSkills, skillCtx);
+  if (skillResult?.type === "stop") {
+    window.speechSynthesis.cancel();
+    isSpeaking = false;
+    setPill("listening");
+    log("sys", "Gestoppt.");
+    return;
+  }
+  if (skillResult?.reply) {
+    speak(skillResult.reply);
+    return;
+  }
+
+  const reply = await getBotReply(forSkills || text);
   speak(reply);
 }
 
@@ -536,7 +677,7 @@ function speak(text) {
   }
   window.speechSynthesis.cancel();
   const utter = new SpeechSynthesisUtterance(text);
-  utter.lang = "de-DE";
+  utter.lang = settings.lang;
   utter.rate = 1.0;
 
   utter.onstart = () => {
@@ -600,15 +741,26 @@ startBtn.addEventListener("click", async () => {
     overlay.height = video.videoHeight || 480;
 
     log("sys", "Lade Tracking-Modelle…");
-    await initTrackers();
-    log("sys", "Tracking bereit.");
+    try {
+      await initTrackers();
+      log("sys", "Tracking bereit.");
+    } catch (trackingErr) {
+      console.warn("Tracking-Modelle konnten nicht geladen werden", trackingErr);
+      log(
+        "sys",
+        "Tracking-Modelle nicht verfügbar (z.B. kein Zugriff aufs MediaPipe-CDN). Kamera läuft ohne Gesichts-/Hand-Tracking, Sprache funktioniert trotzdem."
+      );
+    }
 
     trackingRunning = true;
     trackingLoop();
     requestAnimationFrame(avatarLoop);
 
     initSpeech();
-    speak("Hallo, ich höre dir jetzt zu.");
+    const greeting = settings.wakeWord
+      ? `Hallo, ich bin ${settings.name}. Sag "${settings.name}" und ich höre zu.`
+      : `Hallo, ich bin ${settings.name} und höre dir jetzt zu.`;
+    speak(greeting);
 
     startBtn.textContent = "Läuft";
   } catch (err) {
@@ -620,4 +772,12 @@ startBtn.addEventListener("click", async () => {
   }
 });
 
+stopBtn?.addEventListener("click", () => {
+  if (window.speechSynthesis) window.speechSynthesis.cancel();
+  isSpeaking = false;
+  if (trackingRunning) setPill("listening");
+  log("sys", "Gestoppt.");
+});
+
+restorePersistedLog();
 setPill("idle");

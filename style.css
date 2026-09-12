@@ -105,7 +105,9 @@ body {
   gap: 14px;
 }
 
-button#startBtn {
+.btn-row { display: flex; gap: 8px; }
+
+button#startBtn, button#stopBtn {
   background: var(--accent);
   border: none;
   color: #1a1200;
@@ -116,6 +118,58 @@ button#startBtn {
   font-size: 14px;
 }
 button#startBtn:disabled { opacity: 0.6; cursor: default; }
+
+button#stopBtn {
+  background: var(--panel-2);
+  color: var(--err);
+  flex: 0 0 auto;
+}
+button#stopBtn:hover { background: rgba(255,93,93,0.15); }
+
+.settings {
+  background: var(--panel-2);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 13px;
+}
+.settings summary { cursor: pointer; font-weight: 600; }
+.settings label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.settings label.row {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+.settings input[type="text"], .settings select {
+  background: var(--panel);
+  border: 1px solid #2a2f40;
+  color: var(--text);
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-size: 13px;
+}
+.settings-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+.settings-actions button {
+  flex: 1;
+  background: var(--panel);
+  border: 1px solid #2a2f40;
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.settings-actions button:hover { border-color: var(--accent-2); }
 
 .metrics {
   display: grid;
