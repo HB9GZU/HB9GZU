@@ -1,8 +1,45 @@
-# Cat-Bot Avatar
+# Cat-Bot — Jarvis-Modus
 
 Ein lauffähiger Browser-Prototyp: Kamera-Tracking (Gesicht / Hände / Pose) plus
-freihändige Sprachinteraktion, gerendert als animierter Katzen-Avatar. Reines
-Frontend, kein Build-Schritt, kein Server nötig.
+freihändige Sprachinteraktion, gerendert als animierter Katzen-Avatar — jetzt
+mit einem "Jarvis"-artigen Skill-System obendrauf. Reines Frontend, kein
+Build-Schritt, kein Server nötig.
+
+## Jarvis-Funktionen
+
+Inspiriert von [isair/jarvis](https://github.com/isair/jarvis) (Wake-Word
+irgendwo im Satz, lokale Werkzeuge vor LLM-Fallback, automatische Redaktion,
+persistentes Gedächtnis) und
+[rajkishorbgp/JARVIS-AI-Assistant](https://github.com/rajkishorbgp/JARVIS-AI-Assistant)
+(einfache Sprachbefehle wie Website öffnen, Uhrzeit nennen, Web-Suche) — auf
+das reduziert, was im Browser ohne Server/API-Keys tatsächlich sauber
+umsetzbar ist:
+
+- **Wake-Word**: Standardmäßig reagiert der Assistent nur, wenn sein Name
+  (Standard "Jarvis", änderbar) irgendwo im Satz vorkommt — lässt sich in den
+  Einstellungen abschalten, um wie zuvor auf jede Aussage zu reagieren.
+- **Lokale Skills** (laufen ohne LLM/Server, siehe `skills.js`):
+  Uhrzeit, Datum, Website öffnen ("öffne YouTube"), Web-Suche ("suche nach…"),
+  Wetter (`wttr.in`, kein API-Key nötig), ein sicherer Taschenrechner (kein
+  `eval`), Witze, sowie ein einfaches Gedächtnis ("merke dir, dass…" /
+  "was weißt du noch?" / "vergiss alles").
+- **Sofort-Stop**: "Stop" (per Sprache oder Button) unterbricht die
+  Sprachausgabe augenblicklich — zusätzlich zum bestehenden Barge-In, das
+  jede erkannte Nutzeräußerung während der Ausgabe sofort abbricht.
+- **Automatische Redaktion**: E-Mail-Adressen, Tokens/JWTs und lange
+  Zahlenfolgen werden vor dem Speichern in Gedächtnis/Chatverlauf entfernt.
+- **Persistenter Chatverlauf**: Das Gespräch überlebt einen Seiten-Reload
+  (localStorage, redigiert, auf die letzten 200 Einträge begrenzt).
+- **Einstellungen-Panel**: Assistenten-Name, Wake-Word an/aus, Sprache
+  (Deutsch/Englisch), eigener LLM-Endpoint — alles ohne Build/Server direkt
+  in der UI, persistiert in localStorage.
+- **Robuster Tracking-Fallback**: Ist das MediaPipe-CDN nicht erreichbar
+  (Firewall, offline), läuft die Kamera ohne Gesichts-/Hand-Tracking weiter —
+  Sprache und Skills funktionieren unabhängig davon.
+
+Skill-Reihenfolge bei jeder Äußerung: lokale Jarvis-Skills →
+optionaler eigener LLM-Endpoint → einfacher Regel-Responder als letzter
+Fallback.
 
 ## Starten
 
@@ -73,8 +110,33 @@ Dann vor dem Laden von `app.js` setzen:
 Die App nutzt den Endpoint automatisch, sobald er gesetzt ist, und fällt bei
 Fehlern auf den lokalen Regel-Responder zurück.
 
+## Tests
+
+```bash
+# Reine Logik (Wake-Word, Redaktion, Rechnen, Gedächtnis, Skill-Dispatcher) — Node, keine Abhängigkeiten
+node --test test/skills.test.mjs
+
+# Voller Browser-Smoke-Test (echtes headless Chromium, simulierte Web-Speech-APIs)
+node test/e2e.mjs
+```
+
+`test/e2e.mjs` startet einen kleinen lokalen Static-File-Server, öffnet die
+Seite in Chromium (mit Fake-Kamera/Mikrofon), mockt `SpeechRecognition` und
+`speechSynthesis` (da echte Sprach-Engines headless nicht verfügbar sind) und
+prüft den kompletten Fluss End-to-End: Wake-Word-Gate, alle Skills, Barge-In,
+Einstellungen-Persistenz und den Tracking-Fallback bei nicht erreichbarem
+MediaPipe-CDN.
+
+Der Test braucht Playwright (`npm i -D playwright` in einer eigenen
+Umgebung, falls nicht schon global vorhanden). Liegt es an einem anderen Pfad
+als `node_modules/playwright`, per `PLAYWRIGHT_MODULE_PATH=/pfad/zu/playwright
+node test/e2e.mjs` überschreiben.
+
 ## Dateien
 
-- `index.html` — Layout (Kamera-Panel, Avatar-Panel, Status/Chat-Panel)
+- `index.html` — Layout (Kamera-Panel, Avatar-Panel, Status/Chat/Einstellungen-Panel)
 - `style.css` — Styling
-- `app.js` — Tracking-Pipeline, Avatar-Rendering, Sprachlogik
+- `app.js` — Tracking-Pipeline, Avatar-Rendering, Sprachlogik, Einstellungen
+- `skills.js` — DOM-freie Jarvis-Skill-Logik (Wake-Word, Redaktion, Rechnen, Gedächtnis, Intents)
+- `test/skills.test.mjs` — Node-Unit-Tests für `skills.js`
+- `test/e2e.mjs` — Playwright-Smoke-Test für die komplette Seite
