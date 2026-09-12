@@ -15,6 +15,7 @@ import {
   clearMemory,
   resolveSiteUrl,
   getSkillReply,
+  normalizeDe,
 } from "../skills.js";
 
 function makeStorage() {
@@ -198,4 +199,54 @@ test("getSkillReply: Hilfe", async () => {
 test("getSkillReply: unbekannter Text ergibt null (Fallback an LLM/Regel-Responder)", async () => {
   const res = await getSkillReply("erzaehl mir von deinem Tag", makeCtx());
   assert.equal(res, null);
+});
+
+// --- Regressionstests fuer Codex-Review-Findings auf PR #1 ------------------
+
+test("extractMathExpression erhaelt Klammern statt sie abzuschneiden", () => {
+  assert.equal(extractMathExpression("rechne (2 + 3) * 4"), "(2+3)*4");
+});
+
+test("mathIntent rechnet mit Klammern korrekt (nicht nur den ersten Teilausdruck)", () => {
+  assert.equal(mathIntent("rechne (2 + 3) * 4"), "(2+3)*4 = 20");
+});
+
+test("containsWakeWord erkennt Namen mit Nicht-ASCII-Zeichen (Unicode-Wortgrenzen)", () => {
+  assert.equal(containsWakeWord("Hey René, wie spaet ist es?", "René"), true);
+  assert.equal(containsWakeWord("Renéson ist kein Treffer", "René"), false);
+  assert.equal(containsWakeWord("Hallo 猫, wie geht's?", "猫"), true);
+});
+
+test("stripWakeWord funktioniert auch mit Nicht-ASCII-Namen", () => {
+  assert.equal(stripWakeWord("René, wie spaet ist es?", "René"), "wie spaet ist es?");
+});
+
+test("normalizeDe faltet ß/ä/ö/ü auf ASCII", () => {
+  assert.equal(normalizeDe("was weißt du noch"), "was weisst du noch");
+});
+
+test("getSkillReply: 'was weißt du noch?' (echtes ß) erreicht den Recall-Skill", async () => {
+  const ctx = makeCtx();
+  await getSkillReply("merke dir dass die Katze Minka heisst", ctx);
+  const res = await getSkillReply("was weißt du noch?", ctx);
+  assert.equal(res.type, "recall");
+  assert.match(res.reply, /Minka/);
+});
+
+test("getSkillReply: Englisch-Locale beantwortet englische Befehle auf Englisch", async () => {
+  const ctx = makeCtx({ locale: "en-US" });
+  const time = await getSkillReply("what time is it?", ctx);
+  assert.equal(time.type, "time");
+  assert.match(time.reply, /It's/);
+
+  const joke = await getSkillReply("tell me a joke", ctx);
+  assert.equal(joke.type, "joke");
+
+  const math = await getSkillReply("what is 6 times 7", ctx);
+  assert.equal(math.type, "math");
+  assert.match(math.reply, /42/);
+
+  const open = await getSkillReply("open youtube", ctx);
+  assert.equal(open.type, "open");
+  assert.match(open.reply, /Opening youtube/);
 });

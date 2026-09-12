@@ -76,7 +76,10 @@ function startServer() {
 // damit der volle Sprachfluss ohne Mikrofonhardware/Audio-Server testbar ist.
 const INIT_SCRIPT = `
   window.__openedUrls = [];
-  window.open = (url) => { window.__openedUrls.push(url); return null; };
+  // Standardmaessig simuliert das einen ERFOLGREICHEN window.open (truthy
+  // Rueckgabewert) — ein Test weiter unten schaltet das gezielt auf "vom
+  // Popup-Blocker verworfen" (Rueckgabewert null) um.
+  window.open = (url) => { window.__openedUrls.push(url); return {}; };
 
   window.__ttsLog = [];
   window.__ttsCancelCount = 0;
@@ -131,6 +134,20 @@ const INIT_SCRIPT = `
   }
   window.SpeechRecognition = MockSpeechRecognition;
   window.webkitSpeechRecognition = MockSpeechRecognition;
+
+  // Erlaubt es Tests, den Wetter-Fetch (wttr.in) kuenstlich zu verzoegern, um
+  // die Race-Condition "Stop waehrend eine Antwort noch unterwegs ist" zu
+  // reproduzieren (window.__weatherDelayMs, Default 0 = sofort).
+  window.__weatherDelayMs = 0;
+  const _origFetch = window.fetch.bind(window);
+  window.fetch = (url, ...rest) => {
+    if (typeof url === "string" && url.includes("wttr.in")) {
+      return new Promise((resolve) => {
+        setTimeout(() => resolve({ ok: true, text: async () => "Testwetter: 20°C" }), window.__weatherDelayMs);
+      });
+    }
+    return _origFetch(url, ...rest);
+  };
 `;
 
 async function main() {
@@ -340,6 +357,27 @@ async function main() {
       assert.equal(opened, "https://www.youtube.com");
     });
 
+    await check("Blockiertes Popup: 'Erfolg' wird nicht stillschweigend behauptet", async () => {
+      // Simuliert einen Browser, dessen Popup-Blocker window.open() verwirft
+      // (gibt null zurueck statt eines Fensters) — genau der Fall, den ein
+      // verzoegerter Sprach-Callback ohne "echten" Klick ausloesen kann.
+      await page.evaluate(() => { window.open = (url) => { window.__openedUrls.push(url); return null; }; });
+      const before = await page.evaluate(() => document.querySelectorAll("#log .sys").length);
+      await page.evaluate(() => window.__recognitionInstance.emitFinal("Jarvis öffne github"));
+      await page.waitForFunction(
+        (n) => document.querySelectorAll("#log .sys").length > n,
+        before,
+        { timeout: 3000 }
+      );
+      const lastText = await page.evaluate(() => {
+        const nodes = document.querySelectorAll("#log .sys");
+        return nodes[nodes.length - 1].textContent;
+      });
+      assert.match(lastText, /Popup blockiert/);
+      // Fuer die folgenden Tests wieder auf "erfolgreiches" window.open zurueckstellen.
+      await page.evaluate(() => { window.open = (url) => { window.__openedUrls.push(url); return {}; }; });
+    });
+
     await check("Barge-In: Sprache waehrend TTS-Ausgabe bricht sofort ab", async () => {
       // Laesst den Assistenten etwas laenger sprechen (Witz-Skill), damit
       // die simulierte Nutzer-Unterbrechung waehrend isSpeaking=true ankommt.
@@ -360,12 +398,41 @@ async function main() {
       await page.waitForTimeout(50);
     });
 
+    await check("Stop waehrend eine langsame Antwort unterwegs ist: keine verspaetete Rede danach", async () => {
+      // Reproduziert die Race Condition: eine langsame Wetterabfrage ist noch
+      // unterwegs, der Nutzer sagt "Stop" - wenn der Fetch danach doch noch
+      // aufloest, darf er NICHT nachtraeglich sprechen.
+      await page.evaluate(() => { window.__weatherDelayMs = 600; });
+      const before = await page.evaluate(() => window.__ttsLog.length);
+      await page.evaluate(() => window.__recognitionInstance.emitFinal("Jarvis wetter in Berlin"));
+      await page.waitForTimeout(450); // nach dem 350ms-Debounce, aber vor Ablauf des 600ms-Fetches
+      await page.evaluate(() => window.__recognitionInstance.emitFinal("Jarvis stop"));
+      await page.waitForTimeout(900); // wartet den verzoegerten Fetch ab (haette bei 350+600ms aufgeloest)
+      const after = await page.evaluate(() => window.__ttsLog.length);
+      assert.equal(after, before, "Der ueberholte Wetter-Fetch hat trotz Stop noch gesprochen");
+      await page.evaluate(() => { window.__weatherDelayMs = 0; });
+    });
+
     await check("Rechnen ueber Sprache: 'Jarvis was ist 6 mal 7' liefert 42", async () => {
       const before = await page.evaluate(() => window.__ttsLog.length);
       await page.evaluate(() => window.__recognitionInstance.emitFinal("Jarvis was ist 6 mal 7"));
       await page.waitForFunction((n) => window.__ttsLog.length > n, before, { timeout: 3000 });
       const said = await page.evaluate(() => window.__ttsLog.at(-1));
       assert.match(said, /42/);
+    });
+
+    await check("Sprache auf Englisch umstellen: englische Befehle werden verstanden", async () => {
+      await page.evaluate(() => { document.getElementById("settingsPanel").open = true; });
+      await page.selectOption("#cfgLang", "en-US");
+      await page.click("#saveSettingsBtn");
+      const before = await page.evaluate(() => window.__ttsLog.length);
+      await page.evaluate(() => window.__recognitionInstance.emitFinal("Jarvis what time is it?"));
+      await page.waitForFunction((n) => window.__ttsLog.length > n, before, { timeout: 3000 });
+      const said = await page.evaluate(() => window.__ttsLog.at(-1));
+      assert.match(said, /It's/);
+      // Zurueck auf Deutsch fuer eventuell folgende Checks.
+      await page.selectOption("#cfgLang", "de-DE");
+      await page.click("#saveSettingsBtn");
     });
 
     await check("Keine unerwarteten Browser-Konsolenfehler", async () => {

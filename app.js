@@ -108,9 +108,20 @@ clearMemoryBtn?.addEventListener("click", () => {
 const skillCtx = {
   storage: window.localStorage,
   now: () => new Date(),
-  openUrl: (url) => window.open(url, "_blank", "noopener"),
+  openUrl: (url) => {
+    // window.open() aus einem verzoegerten Sprach-Callback heraus (kein
+    // direkter Klick) kann vom Popup-Blocker verworfen werden — dann still
+    // "Erfolg" zu melden waere irrefuehrend, also ehrlich zurueckfallen.
+    const win = window.open(url, "_blank", "noopener");
+    if (!win) {
+      log("sys", `Popup blockiert – bitte manuell öffnen: ${url}`);
+    }
+  },
   fetchImpl: (...args) => window.fetch(...args),
   rng: Math.random,
+  get locale() {
+    return settings.lang;
+  },
 };
 
 function persistLogEntry(role, text) {
@@ -583,6 +594,11 @@ let isSpeaking = false;
 let currentUtterance = null;
 let finalizeTimer = null;
 let pendingTranscript = "";
+// Wird bei jeder neuen Aeusserung und jedem Stop erhoeht, damit eine spaet
+// zurueckkommende Antwort (langsamer Wetter-/LLM-Fetch) nach einem
+// zwischenzeitlichen Stop oder einer neueren Aeusserung nicht doch noch
+// nachtraeglich losgesprochen wird.
+let conversationGeneration = 0;
 
 function initSpeech() {
   if (!SpeechRecognitionCtor) {
@@ -609,6 +625,7 @@ function initSpeech() {
     if (isSpeaking && (interim.trim() || final.trim())) {
       window.speechSynthesis.cancel();
       isSpeaking = false;
+      conversationGeneration++;
       setPill("listening");
       triggerBlink();
     }
@@ -650,10 +667,16 @@ async function handleUserUtterance(text) {
     return;
   }
 
+  // Jede neue Aeusserung macht vorherige noch ausstehende Antworten
+  // (langsamer Wetter-/LLM-Fetch) obsolet.
+  const myGeneration = ++conversationGeneration;
+
   log("me", text);
   const forSkills = settings.wakeWord ? stripWakeWord(text, settings.name) : text;
 
   const skillResult = await getSkillReply(forSkills, skillCtx);
+  if (myGeneration !== conversationGeneration) return; // durch Stop/neue Aeusserung ueberholt
+
   if (skillResult?.type === "stop") {
     window.speechSynthesis.cancel();
     isSpeaking = false;
@@ -667,6 +690,7 @@ async function handleUserUtterance(text) {
   }
 
   const reply = await getBotReply(forSkills || text);
+  if (myGeneration !== conversationGeneration) return; // durch Stop/neue Aeusserung ueberholt
   speak(reply);
 }
 
@@ -775,6 +799,7 @@ startBtn.addEventListener("click", async () => {
 stopBtn?.addEventListener("click", () => {
   if (window.speechSynthesis) window.speechSynthesis.cancel();
   isSpeaking = false;
+  conversationGeneration++; // verwirft alle noch ausstehenden Antworten
   if (trackingRunning) setPill("listening");
   log("sys", "Gestoppt.");
 });

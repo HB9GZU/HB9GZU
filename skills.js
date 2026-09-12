@@ -16,15 +16,31 @@ export function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+// Faltet deutsche Sonderzeichen auf ASCII (fuer tolerantes Matching, z.B.
+// "weißt" == "weisst", "spät" == "spaet") — nur zum Vergleichen, nie zur Anzeige.
+export function normalizeDe(s) {
+  return s
+    .replace(/ß/g, "ss")
+    .replace(/ä/g, "ae")
+    .replace(/ö/g, "oe")
+    .replace(/ü/g, "ue");
+}
+
 // ---------------------------------------------------------------------------
 // Wake-Word
 // ---------------------------------------------------------------------------
+// \b in JS-Regex kennt nur ASCII-Wortzeichen — ein Name wie "René" oder "猫"
+// würde damit nie als eigenes Wort erkannt. Unicode-Property-Escapes (mit
+// dem u-Flag) funktionieren unabhängig vom Schriftsystem des Namens.
+function wordBoundaryPattern(name) {
+  return `(?<![\\p{L}\\p{N}_])${escapeRegExp(name)}(?![\\p{L}\\p{N}_])`;
+}
+
 export function containsWakeWord(text, name = DEFAULT_ASSISTANT_NAME) {
   const n = (name || "").trim();
   if (!n) return true;
   if (!text) return false;
-  const re = new RegExp(`\\b${escapeRegExp(n)}\\b`, "i");
-  return re.test(text);
+  return new RegExp(wordBoundaryPattern(n), "iu").test(text);
 }
 
 // Entfernt den Namen (samt evtl. Komma/Anrede-Zeichen) aus dem Text, damit
@@ -32,7 +48,7 @@ export function containsWakeWord(text, name = DEFAULT_ASSISTANT_NAME) {
 export function stripWakeWord(text, name = DEFAULT_ASSISTANT_NAME) {
   const n = (name || "").trim();
   if (!n || !text) return (text || "").trim();
-  const re = new RegExp(`\\b${escapeRegExp(n)}\\b[,!.]?\\s*`, "i");
+  const re = new RegExp(`${wordBoundaryPattern(n)}[,!.]?\\s*`, "iu");
   return text.replace(re, "").trim();
 }
 
@@ -59,20 +75,33 @@ const WORD_OPS = [
   [/\bplus\b/gi, "+"],
   [/\bminus\b/gi, "-"],
   [/\bmal\b/gi, "*"],
+  [/\btimes\b/gi, "*"],
+  [/\bmultiplied by\b/gi, "*"],
   [/\bmultipliziert mit\b/gi, "*"],
+  [/\bdivided by\b/gi, "/"],
   [/\bdividiert durch\b/gi, "/"],
   [/\bgeteilt durch\b/gi, "/"],
   [/\bdurch\b/gi, "/"],
   [/\bhoch\b/gi, "^"],
+  [/\bto the power of\b/gi, "^"],
 ];
 
+// Findet die laengste zusammenhaengende Formel im Text — inklusive Klammern,
+// die evaluateExpression unterstuetzt (z.B. "(2 + 3) * 4"), statt sie beim
+// Extrahieren stillschweigend abzuschneiden.
 export function extractMathExpression(text) {
   if (!text) return null;
   let t = text.toLowerCase();
   for (const [re, sym] of WORD_OPS) t = t.replace(re, sym);
   t = t.replace(/,/g, ".");
-  const match = t.match(/-?\d+(\.\d+)?\s*(?:[+\-*/^]\s*-?\d+(\.\d+)?\s*)+/);
-  return match ? match[0].trim().replace(/\s+/g, "") : null;
+  const candidates = t.match(/[0-9+\-*/^().\s]+/g) || [];
+  let best = null;
+  for (const candidate of candidates) {
+    if (!/[+\-*/^]/.test(candidate) || !/\d/.test(candidate)) continue;
+    const trimmed = candidate.trim();
+    if (!best || trimmed.length > best.length) best = trimmed;
+  }
+  return best ? best.replace(/\s+/g, "") : null;
 }
 
 class MathParseError extends Error {}
@@ -176,7 +205,7 @@ function tokenize(expr) {
   return tokens;
 }
 
-const MATH_TRIGGER_RE = /\b(was ist|wie ?viel ist|rechne|berechne)\b/i;
+const MATH_TRIGGER_RE = /\b(was ist|wie ?viel ist|rechne|berechne|what('?s| is)|how much is|calculate|compute)\b/i;
 
 export function mathIntent(text) {
   const expr = extractMathExpression(text);
@@ -255,6 +284,13 @@ export const JOKES = [
   "Warum nehmen Roboter niemals ein Bad? Sie haben Angst vor Kurzschluessen.",
 ];
 
+export const JOKES_EN = [
+  "Why do programmers prefer dark mode? Because light attracts bugs.",
+  "I told my computer a joke. It didn't laugh, but the CPU did warm up.",
+  "Why was the robot's memory so bad? Everything just kept crashing.",
+  "Why don't robots ever panic? They always keep their circuits calm.",
+];
+
 export function pick(arr, rng = Math.random) {
   return arr[Math.floor(rng() * arr.length)];
 }
@@ -279,88 +315,104 @@ export async function fetchWeather(city, fetchImpl) {
 //   fetchImpl: fetch-kompatible Funktion
 //   openUrl: (url) => void
 //   rng: () => number  (fuer deterministische Tests)
+//   locale: "de-DE" | "en-US" | ... (steuert Sprache der Antworten + Datum/Zeit-Format)
 // }
 export async function getSkillReply(rawText, ctx) {
   const text = (rawText || "").trim();
   if (!text) return null;
-  const t = text.toLowerCase();
+  // Fuer alle festen Trigger-Phrasen wird auf einer ASCII-gefalteten,
+  // kleingeschriebenen Kopie gematcht (deutsche Sonderzeichen wie ß/ä
+  // sind damit fuer Deutsch- UND Englisch-Muster gleichermassen egal).
+  const t = normalizeDe(text.toLowerCase());
   const now = ctx.now ? ctx.now() : new Date();
+  const locale = ctx.locale || "de-DE";
+  const lang = locale.toLowerCase().startsWith("en") ? "en" : "de";
+  const say = (de, en) => (lang === "en" ? en : de);
 
   if (/\b(stop|stopp|halt|sei still|ruhe)\b/.test(t)) {
     return { type: "stop", reply: null };
   }
 
-  if (/vergiss (alles|das alles|bitte alles)/.test(t)) {
+  if (/(vergiss (alles|das alles|bitte alles)|forget everything|forget it all)/.test(t)) {
     clearMemory(ctx.storage);
-    return { type: "forget", reply: "Erledigt, ich habe mein Gedaechtnis geleert." };
+    return { type: "forget", reply: say("Erledigt, ich habe mein Gedaechtnis geleert.", "Done, I've cleared my memory.") };
   }
 
-  let m = text.match(/^(?:merke dir|merk dir|denk daran)(?: dass| das)?\s+(.+)/i);
+  let m = text.match(/^(?:merke dir|merk dir|denk daran)(?: dass| das)?\s+(.+)/i) || text.match(/^remember(?: that)?\s+(.+)/i);
   if (m && m[1]) {
     saveMemoryFact(ctx.storage, m[1]);
-    return { type: "remember", reply: `Alles klar, ich merke mir: "${m[1]}".` };
+    return { type: "remember", reply: say(`Alles klar, ich merke mir: "${m[1]}".`, `Got it, I'll remember: "${m[1]}".`) };
   }
 
-  if (/(was weisst du( noch)?\??$|was hast du dir gemerkt|zeig(e)? (mir )?(meine )?erinnerungen)/.test(t)) {
+  if (
+    /(was weisst du( noch)?\??$|was hast du dir gemerkt|zeig(e)? (mir )?(meine )?erinnerungen|what do you know|what have you remembered|show my memories)/.test(
+      t
+    )
+  ) {
     const facts = loadMemory(ctx.storage);
-    if (!facts.length) return { type: "recall", reply: "Ich habe mir noch nichts gemerkt." };
+    if (!facts.length) return { type: "recall", reply: say("Ich habe mir noch nichts gemerkt.", "I haven't remembered anything yet.") };
     const list = facts.slice(-5).map((f) => f.text).join("; ");
-    return { type: "recall", reply: `Das habe ich mir gemerkt: ${list}.` };
+    return { type: "recall", reply: say(`Das habe ich mir gemerkt: ${list}.`, `Here's what I remember: ${list}.`) };
   }
 
-  if (/(wie spaet|wieviel uhr|wie viel uhr|uhrzeit)/.test(t.replace(/ä/g, "ae"))) {
-    const time = now.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
-    return { type: "time", reply: `Es ist ${time} Uhr.` };
+  if (/(wie spaet|wieviel uhr|wie viel uhr|uhrzeit|what time is it|what's the time|current time)/.test(t)) {
+    const time = now.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" });
+    return { type: "time", reply: say(`Es ist ${time} Uhr.`, `It's ${time}.`) };
   }
 
-  if (/(welches datum|welcher tag|heutiges datum|datum heute)/.test(t)) {
-    const date = now.toLocaleDateString("de-DE", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
-    return { type: "date", reply: `Heute ist ${date}.` };
+  if (/(welches datum|welcher tag|heutiges datum|datum heute|what's the date|what is the date|what day is it|today's date)/.test(t)) {
+    const date = now.toLocaleDateString(locale, { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+    return { type: "date", reply: say(`Heute ist ${date}.`, `Today is ${date}.`) };
   }
 
-  m = text.match(/^(?:oeffne|öffne|starte|geh zu)\s+(.+)/i);
+  m = text.match(/^(?:oeffne|öffne|starte|geh zu|open|go to|launch)\s+(.+)/i);
   if (m && m[1]) {
     const url = resolveSiteUrl(m[1]);
     if (url) {
       if (ctx.openUrl) ctx.openUrl(url);
-      return { type: "open", reply: `Ich oeffne ${m[1].trim()} fuer dich.`, url };
+      return { type: "open", reply: say(`Ich oeffne ${m[1].trim()} fuer dich.`, `Opening ${m[1].trim()} for you.`), url };
     }
   }
 
-  m = text.match(/(?:suche(?:n)? (?:im internet )?nach|google)\s+(.+)/i);
+  m = text.match(/(?:suche(?:n)? (?:im internet )?nach|google|search(?: the web)? for)\s+(.+)/i);
   if (m && m[1]) {
     const query = m[1].trim();
     const url = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
     if (ctx.openUrl) ctx.openUrl(url);
-    return { type: "search", reply: `Ich suche im Internet nach "${query}".`, url };
+    return { type: "search", reply: say(`Ich suche im Internet nach "${query}".`, `Searching the web for "${query}".`), url };
   }
 
-  m = text.match(/wetter(?: in| fuer| für)?\s+(.+)/i);
+  m = text.match(/wetter(?: in| fuer| für)?\s+(.+)/i) || text.match(/weather(?: in| for)?\s+(.+)/i);
   if (m && m[1] && ctx.fetchImpl) {
     const city = m[1].trim();
     try {
       const report = await fetchWeather(city, ctx.fetchImpl);
-      return { type: "weather", reply: `Das Wetter: ${report}` };
+      return { type: "weather", reply: say(`Das Wetter: ${report}`, `The weather: ${report}`) };
     } catch {
       return {
         type: "weather",
-        reply: `Ich konnte das Wetter fuer ${city} gerade nicht abrufen. Vielleicht ist keine Internetverbindung da.`,
+        reply: say(
+          `Ich konnte das Wetter fuer ${city} gerade nicht abrufen. Vielleicht ist keine Internetverbindung da.`,
+          `I couldn't fetch the weather for ${city} right now. Maybe there's no internet connection.`
+        ),
       };
     }
   }
 
-  if (/(erzaehl(e)? (mir )?einen witz|witz bitte|mach (mal )?(ei nen |einen )?witz)/.test(t.replace(/ä/g, "ae"))) {
-    return { type: "joke", reply: pick(JOKES, ctx.rng) };
+  if (/(erzaehl(e)? (mir )?einen witz|witz bitte|mach (mal )?(ei nen |einen )?witz|tell me a joke|tell a joke)/.test(t)) {
+    return { type: "joke", reply: pick(lang === "en" ? JOKES_EN : JOKES, ctx.rng) };
   }
 
   const mathReply = mathIntent(text);
   if (mathReply) return { type: "math", reply: mathReply };
 
-  if (/(was kannst du|hilfe|welche befehle|was fuer befehle)/.test(t.replace(/ä/g, "ae"))) {
+  if (/(was kannst du|hilfe|welche befehle|was fuer befehle|what can you do|what commands)/.test(t)) {
     return {
       type: "help",
-      reply:
+      reply: say(
         "Ich kann zum Beispiel: die Uhrzeit oder das Datum nennen, eine Website oeffnen, im Internet suchen, das Wetter nennen, rechnen, Witze erzaehlen, mir Dinge merken oder wieder vergessen — und mit 'Stop' unterbreche ich mich sofort.",
+        "I can, for example: tell you the time or date, open a website, search the web, tell you the weather, do calculations, tell jokes, remember or forget things — and 'stop' interrupts me instantly."
+      ),
     };
   }
 
